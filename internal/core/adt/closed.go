@@ -91,9 +91,37 @@ const (
 
 // TODO: merge with closeInfo: this is a leftover of the refactoring.
 type CloseInfo struct {
-	IsClosed bool
-
 	*closeInfo
+
+	IsClosed bool
+}
+
+func (c CloseInfo) Location() Node {
+	if c.closeInfo == nil {
+		return nil
+	}
+	return c.closeInfo.location
+}
+
+func (c CloseInfo) SpanMask() SpanType {
+	if c.closeInfo == nil {
+		return 0
+	}
+	return c.span
+}
+
+func (c CloseInfo) RootSpanType() SpanType {
+	if c.closeInfo == nil {
+		return 0
+	}
+	return c.root
+}
+
+func (c CloseInfo) IsInOneOf(t SpanType) bool {
+	if c.closeInfo == nil {
+		return false
+	}
+	return c.span&t != 0
 }
 
 // TODO(perf): remove: error positions should always be computed on demand
@@ -109,27 +137,70 @@ func (c *CloseInfo) AddPositions(ctx *OpContext) {
 // TODO(perf): use on StructInfo. Then if parent and expression are the same
 // it is possible to use cached value.
 func (c CloseInfo) SpawnEmbed(x Expr) CloseInfo {
+	var span SpanType
+	if c.closeInfo != nil {
+		span = c.span
+	}
+
 	c.closeInfo = &closeInfo{
 		parent:   c.closeInfo,
 		location: x,
 		mode:     closeEmbed,
-		embedded: true,
+		root:     EmbeddingSpan,
+		span:     span | EmbeddingSpan,
+	}
+	return c
+}
+
+// SpawnGroup is used for structs that contain embeddings that may end up
+// closing the struct. This is to force that `b` is not allowed in
+//
+//      a: {#foo} & {b: int}
+//
+func (c CloseInfo) SpawnGroup(x Expr) CloseInfo {
+	var span SpanType
+	if c.closeInfo != nil {
+		span = c.span
+	}
+	c.closeInfo = &closeInfo{
+		parent:   c.closeInfo,
+		location: x,
+		span:     span,
+	}
+	return c
+}
+
+// SpawnSpan is used to track that a value is introduced by a comprehension
+// or constraint. Definition and embedding spans are introduced with SpawnRef
+// and SpawnEmbed, respectively.
+func (c CloseInfo) SpawnSpan(x Node, t SpanType) CloseInfo {
+	var span SpanType
+	if c.closeInfo != nil {
+		span = c.span
+	}
+	c.closeInfo = &closeInfo{
+		parent:   c.closeInfo,
+		location: x,
+		root:     t,
+		span:     span | t,
 	}
 	return c
 }
 
 func (c CloseInfo) SpawnRef(arc *Vertex, isDef bool, x Expr) CloseInfo {
-	embedded := false
+	var span SpanType
 	if c.closeInfo != nil {
-		embedded = c.embedded
+		span = c.span
 	}
 	c.closeInfo = &closeInfo{
 		parent:   c.closeInfo,
 		location: x,
-		embedded: embedded,
+		span:     span,
 	}
 	if isDef {
 		c.mode = closeDef
+		c.closeInfo.root = DefinitionSpan
+		c.closeInfo.span |= DefinitionSpan
 	}
 	return c
 }
@@ -156,6 +227,19 @@ func IsDef(x Expr) bool {
 	return false
 }
 
+// A SpanType is used to indicate whether a CUE value is within the scope of
+// a certain CUE language construct, the span type.
+type SpanType uint8
+
+const (
+	// EmbeddingSpan means that this value was embedded at some point and should
+	// not be included as a possible root node in the todo field of OpContext.
+	EmbeddingSpan SpanType = 1 << iota
+	ConstraintSpan
+	ComprehensionSpan
+	DefinitionSpan
+)
+
 type closeInfo struct {
 	// location records the expression that led to this node's introduction.
 	location Node
@@ -175,9 +259,8 @@ type closeInfo struct {
 	//  - it is a sibling of a new definition.
 	noCheck bool // don't process for inclusion info
 
-	// embedded means that this value was embedded at some point and should
-	// not be included as a possible root node in the todo field of OpContext.
-	embedded bool
+	root SpanType
+	span SpanType
 }
 
 // closeStats holds the administrative fields for a closeInfo value. Each
@@ -209,6 +292,9 @@ func (c *closeInfo) isClosed() bool {
 
 func isClosed(v *Vertex) bool {
 	for _, s := range v.Structs {
+		if s.IsClosed {
+			return true
+		}
 		for c := s.closeInfo; c != nil; c = c.parent {
 			if c.isClosed() {
 				return true
@@ -282,7 +368,7 @@ func markRequired(ctx *OpContext, info *closeInfo) {
 			return
 		}
 
-		if !s.embedded {
+		if s.span&EmbeddingSpan == 0 {
 			x.next = ctx.todo
 			ctx.todo = x
 		}

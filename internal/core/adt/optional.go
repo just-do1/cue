@@ -20,13 +20,16 @@ package adt
 func (o *StructInfo) MatchAndInsert(c *OpContext, arc *Vertex) {
 	env := o.Env
 
+	closeInfo := o.CloseInfo
+	closeInfo.IsClosed = false
+
 	// Match normal fields
 	matched := false
 outer:
 	for _, f := range o.Fields {
 		if f.Label == arc.Label {
 			for _, e := range f.Optional {
-				arc.AddConjunct(MakeConjunct(env, e, o.CloseInfo))
+				arc.AddConjunct(MakeConjunct(env, e, closeInfo))
 			}
 			matched = true
 			break outer
@@ -37,22 +40,26 @@ outer:
 		return
 	}
 
-	bulkEnv := *env
-	bulkEnv.DynamicLabel = arc.Label
-	bulkEnv.Deref = nil
-	bulkEnv.Cycles = nil
+	if len(o.Bulk) > 0 {
+		bulkEnv := *env
+		bulkEnv.DynamicLabel = arc.Label
+		bulkEnv.Deref = nil
+		bulkEnv.Cycles = nil
 
-	// match bulk optional fields / pattern properties
-	for _, b := range o.Bulk {
-		// if matched && f.additional {
-		// 	continue
-		// }
-		if matchBulk(c, env, b, arc.Label) {
-			matched = true
-			arc.AddConjunct(MakeConjunct(&bulkEnv, b, o.CloseInfo))
+		// match bulk optional fields / pattern properties
+		for _, b := range o.Bulk {
+			// if matched && f.additional {
+			// 	continue
+			// }
+			if matchBulk(c, env, b, arc.Label) {
+				matched = true
+				info := closeInfo.SpawnSpan(b.Value, ConstraintSpan)
+				arc.AddConjunct(MakeConjunct(&bulkEnv, b, info))
+			}
 		}
 	}
-	if matched {
+
+	if matched || len(o.Additional) == 0 {
 		return
 	}
 
@@ -62,7 +69,11 @@ outer:
 
 	// match others
 	for _, x := range o.Additional {
-		arc.AddConjunct(MakeConjunct(&addEnv, x, o.CloseInfo))
+		info := closeInfo
+		if _, ok := x.(*Top); !ok {
+			info = info.SpawnSpan(x, ConstraintSpan)
+		}
+		arc.AddConjunct(MakeConjunct(&addEnv, x, info))
 	}
 }
 
@@ -77,7 +88,11 @@ func matchBulk(c *OpContext, env *Environment, x *BulkOptionalField, f Feature) 
 	if m == nil {
 		return false
 	}
-	return m.Match(c, env, f)
+
+	c.inConstraint++
+	ret := m.Match(c, env, f)
+	c.inConstraint--
+	return ret
 }
 
 func getMatcher(c *OpContext, env *Environment, v Value) fieldMatcher {

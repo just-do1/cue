@@ -121,7 +121,7 @@ y: conflicting values 4 and 2:
 		y: x + 1
 		x: y - 1
 		`,
-		out: "cycle\ncycle error:\n    test:3:6",
+		out: "cycle\ncycle error:\n    test:2:6",
 	}, {
 		desc: "disallow cycle",
 		cfg:  &Config{DisallowCycles: true},
@@ -129,7 +129,7 @@ y: conflicting values 4 and 2:
 		a: b - 100
 		b: a + 100
 		c: [c[1], c[0]]		`,
-		out: "cycle\ncycle error:\n    test:3:6",
+		out: "cycle\ncycle error:\n    test:2:6",
 	}, {
 		desc: "treat cycles as incomplete when not disallowing",
 		cfg:  &Config{},
@@ -163,6 +163,24 @@ y: conflicting values 4 and 2:
 			c: b + b
 		}
 		`,
+	}, {
+		desc: "pick up non-concrete value in default",
+		cfg:  &Config{Concrete: true},
+		in: `
+		x: null | *{
+			a: int
+		}
+		`,
+		out: "incomplete\nx.a: incomplete value int",
+	}, {
+		desc: "pick up non-concrete value in default",
+		cfg:  &Config{Concrete: true},
+		in: `
+			x: null | *{
+				a: 1 | 2
+			}
+			`,
+		out: "incomplete\nx.a: incomplete value 1 | 2",
 	}}
 
 	r := runtime.New()
@@ -178,7 +196,7 @@ y: conflicting values 4 and 2:
 			if err != nil {
 				t.Fatal(err)
 			}
-			ctx.Unify(ctx, v, adt.Finalized)
+			ctx.Unify(v, adt.Finalized)
 			if tc.lookup != "" {
 				v = v.Lookup(adt.MakeIdentLabel(r, tc.lookup, "main"))
 			}

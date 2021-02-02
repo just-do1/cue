@@ -28,8 +28,26 @@ import (
 	"cuelang.org/go/cue/token"
 )
 
+type Option func(*options)
+
+type options struct {
+	simplify   bool
+	deprecated bool
+}
+
+// Simplify enables fixes that simplify the code, but are not strictly
+// necessary.
+func Simplify() Option {
+	return func(o *options) { o.simplify = true }
+}
+
 // File applies fixes to f and returns it. It alters the original f.
-func File(f *ast.File) *ast.File {
+func File(f *ast.File, o ...Option) *ast.File {
+	var options options
+	for _, f := range o {
+		f(&options)
+	}
+
 	// Rewrite integer division operations to use builtins.
 	f = astutil.Apply(f, func(c astutil.Cursor) bool {
 		n := c.Node()
@@ -247,6 +265,10 @@ func File(f *ast.File) *ast.File {
 	// 	}
 	// 	return true
 	// }, nil).(*ast.File)
+
+	if options.simplify {
+		f = simplify(f)
+	}
 
 	return f
 }

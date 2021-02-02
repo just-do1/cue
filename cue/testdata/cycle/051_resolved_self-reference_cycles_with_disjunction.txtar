@@ -181,12 +181,15 @@ Result:
   }
   xb3: (int){ |((int){ 6 }, (int){ 9 }) }
   xb4: (_|_){
-    // [cycle] cycle error:
-    //     ./in.cue:20:6
+    // [incomplete] xb2: unresolved disjunction 6 | 9 (type int):
+    //     ./in.cue:18:6
   }
   xc1: (int){ |((int){ 8 }, (int){ 9 }) }
   xc2: (int){ 8 }
-  xc3: (int){ 6 }
+  xc3: (_|_){
+    // [incomplete] xc3: unresolved disjunction 8 | 9 (type int):
+    //     ./in.cue:29:10
+  }
   xc4: (int){ 9 }
   xc5: (int){ 10 }
   xd1: (int){ 8 }
@@ -230,10 +233,13 @@ Result:
   }
   xf3: (int){ |((int){ 6 }, (int){ 9 }) }
   xf4: (_|_){
-    // [cycle] cycle error:
-    //     ./in.cue:54:6
+    // [incomplete] xf2: unresolved disjunction 6 | 9 (type int):
+    //     ./in.cue:52:6
   }
   z1: (int){ |((int){ 11 }, (int){ 13 }) }
   z2: (int){ 10 }
-  z3: (int){ 8 }
+  z3: (_|_){
+    // [incomplete] z3: unresolved disjunction 11 | 13 (type int):
+    //     ./in.cue:58:5
+  }
 }

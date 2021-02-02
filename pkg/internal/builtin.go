@@ -143,10 +143,20 @@ func toBuiltin(ctx *adt.OpContext, b *Builtin) *adt.Builtin {
 		case nil:
 			// Validators may return a nil in case validation passes.
 			return nil
+		case *adt.Bottom:
+			// deal with API limitation: catch nil interface issue.
+			if v != nil {
+				return v
+			}
+			return nil
 		case adt.Value:
 			return v
 		case bottomer:
-			return v.Bottom()
+			// deal with API limitation: catch nil interface issue.
+			if b := v.Bottom(); b != nil {
+				return b
+			}
+			return nil
 		}
 		if c.Err != nil {
 			return nil
@@ -197,6 +207,8 @@ func processErr(call *CallCtxt, errVal interface{}, ret adt.Expr) adt.Expr {
 	ctx := call.ctx
 	switch err := errVal.(type) {
 	case nil:
+	case *adt.Bottom:
+		ret = err
 	case *callError:
 		ret = err.b
 	case *json.MarshalerError:

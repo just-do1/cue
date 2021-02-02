@@ -23,9 +23,10 @@ import (
 
 func TestFile(t *testing.T) {
 	testCases := []struct {
-		name string
-		in   string
-		out  string
+		name     string
+		in       string
+		out      string
+		simplify bool
 	}{{
 		name: "rewrite integer division",
 		in: `package foo
@@ -85,6 +86,24 @@ a: [ for x in y { x } ]
 		out: `
 let y = foo
 `,
+	}, {
+		simplify: true,
+		in: `
+		x1: 3 & _
+		x2: _ | {[string]: int}
+		x3: 4 & (9 | _)
+		x4: (_ | 9) & 4
+		x5: (_ & 9) & 4
+		x6: 4 & (_ & 9)
+		`,
+		out: `x1: 3
+x2: _
+x3: 4
+x4: 4
+x5: 9 & 4
+x6: 4 & 9
+`,
+
 		// 	}, {
 		// 		name: "slice",
 		// 		in: `package foo
@@ -135,7 +154,13 @@ let y = foo
 			if err != nil {
 				t.Fatal(err)
 			}
-			n := File(f)
+
+			var opts []Option
+			if tc.simplify {
+				opts = append(opts, Simplify())
+			}
+			n := File(f, opts...)
+
 			b, err := format.Node(n)
 			if err != nil {
 				t.Fatal(err)

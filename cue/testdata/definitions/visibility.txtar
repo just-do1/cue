@@ -7,7 +7,7 @@ foo: #foo & {
     _name: "foo"
     _#name: "bar"
 
-    #name: "baz" // TODO: this should not be allowed.
+    #name: "baz"
 }
 -- out/eval --
 (struct){

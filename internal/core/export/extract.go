@@ -17,6 +17,7 @@ package export
 import (
 	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/token"
+	"cuelang.org/go/internal"
 	"cuelang.org/go/internal/core/adt"
 )
 
@@ -37,6 +38,10 @@ func extractDocs(v *adt.Vertex, a []adt.Conjunct) (docs []*ast.CommentGroup) {
 
 	// Collect docs directly related to this Vertex.
 	for _, x := range a {
+		if v, ok := x.Expr().(*adt.Vertex); ok {
+			docs = append(docs, extractDocs(v, v.Conjuncts)...)
+			continue
+		}
 		f, ok := x.Source().(*ast.Field)
 		if !ok || hasShorthandValue(f) {
 			continue
@@ -145,6 +150,34 @@ func ExtractFieldAttrs(a []adt.Conjunct) (attrs []*ast.Attribute) {
 		}
 	}
 	return attrs
+}
+
+func ExtractDeclAttrs(a []adt.Conjunct) (attrs []*ast.Attribute) {
+	for _, c := range a {
+		attrs = extractDeclAttrs(attrs, c.Expr().Source())
+	}
+	return attrs
+}
+
+func extractDeclAttrs(attrs []*ast.Attribute, n ast.Node) []*ast.Attribute {
+	switch x := n.(type) {
+	case nil:
+	case *ast.File:
+		info := internal.GetPackageInfo(x)
+		attrs = appendDeclAttrs(attrs, x.Decls[info.Index:])
+	case *ast.StructLit:
+		attrs = appendDeclAttrs(attrs, x.Elts)
+	}
+	return attrs
+}
+
+func appendDeclAttrs(a []*ast.Attribute, decls []ast.Decl) []*ast.Attribute {
+	for _, d := range decls {
+		if attr, ok := d.(*ast.Attribute); ok && !containsAttr(a, attr) {
+			a = append(a, attr)
+		}
+	}
+	return a
 }
 
 func containsAttr(a []*ast.Attribute, x *ast.Attribute) bool {

@@ -94,39 +94,15 @@ func (c *OpContext) Logf(v *Vertex, format string, args ...interface{}) {
 		v.Path(),
 	}, args...)
 	for i := 2; i < len(a); i++ {
-		if n, ok := a[i].(Node); ok {
-			a[i] = c.Str(n)
+		switch x := a[i].(type) {
+		case Node:
+			a[i] = c.Str(x)
+		case Feature:
+			a[i] = x.SelectorString(c)
 		}
 	}
 	s := fmt.Sprintf(" [%d] %s/%v"+format, a...)
 	_ = log.Output(2, s)
-}
-
-// A Unifier implements a strategy for CUE's unification operation. It must
-// handle the following aspects of CUE evaluation:
-//
-//    - Structural and reference cycles
-//    - Non-monotic validation
-//    - Fixed-point computation of comprehension
-//
-type Unifier interface {
-	// Unify fully unifies all values of a Vertex to completion and stores
-	// the result in the Vertex. If Unify was called on v before it returns
-	// the cached results.
-	Unify(c *OpContext, v *Vertex, state VertexStatus) // error or bool?
-
-	// Evaluate returns the evaluated value associated with v. It may return a
-	// partial result. That is, if v was not yet unified, it may return a
-	// concrete value that must be the result assuming the configuration has no
-	// errors.
-	//
-	// This semantics allows CUE to break reference cycles in a straightforward
-	// manner.
-	//
-	// Vertex v must still be evaluated at some point to catch the underlying
-	// error.
-	//
-	Evaluate(c *OpContext, v *Vertex) Value
 }
 
 // Runtime defines an interface for low-level representation conversion and
@@ -150,24 +126,18 @@ type Runtime interface {
 
 type Config struct {
 	Runtime
-	Unifier
-
 	Format func(Node) string
 }
-
-type config = Config
 
 // New creates an operation context.
 func New(v *Vertex, cfg *Config) *OpContext {
 	if cfg.Runtime == nil {
 		panic("nil Runtime")
 	}
-	if cfg.Unifier == nil {
-		panic("nil Unifier")
-	}
 	ctx := &OpContext{
-		config: *cfg,
-		vertex: v,
+		Runtime: cfg.Runtime,
+		Format:  cfg.Format,
+		vertex:  v,
 	}
 	if v != nil {
 		ctx.e = &Environment{Up: nil, Vertex: v}
@@ -175,11 +145,17 @@ func New(v *Vertex, cfg *Config) *OpContext {
 	return ctx
 }
 
-// An OpContext associates a Runtime and Unifier to allow evaluating the types
-// defined in this package. It tracks errors provides convenience methods for
-// evaluating values.
+// An OpContext implements CUE's unification operation. It's operations only
+// operation on values that are created with the Runtime with which an OpContext
+// is associated. An OpContext is not goroutine save and only one goroutine may
+// use an OpContext at a time.
+//
 type OpContext struct {
-	config
+	Runtime
+	Format func(Node) string
+
+	stats        Stats
+	freeListNode *nodeContext
 
 	e         *Environment
 	src       ast.Node
@@ -190,10 +166,6 @@ type OpContext struct {
 	// this into a stack could also allow determining the cyclic path for
 	// structural cycle errors.
 	vertex *Vertex
-
-	// TODO: remove use of tentative. Should be possible if incomplete
-	// handling is done better.
-	tentative int // set during comprehension evaluation
 
 	// These fields are used associate scratch fields for computing closedness
 	// of a Vertex. These fields could have been included in StructInfo (like
@@ -206,17 +178,31 @@ type OpContext struct {
 	generation int
 	closed     map[*closeInfo]*closeStats
 	todo       *closeStats
+
+	// inDisjunct indicates that non-monotonic checks should be skipped.
+	// This is used if we want to do some extra work to eliminate disjunctions
+	// early. The result of unificantion should be thrown away if this check is
+	// used.
+	//
+	// TODO: replace this with a mechanism to determine the correct set (per
+	// conjunct) of StructInfos to include in closedness checking.
+	inDisjunct int
+
+	// inConstaint overrides inDisjunct as field matching should always be
+	// enabled.
+	inConstraint int
+}
+
+func (n *nodeContext) skipNonMonotonicChecks() bool {
+	if n.ctx.inConstraint > 0 {
+		return false
+	}
+	return n.ctx.inDisjunct > 0
 }
 
 // Impl is for internal use only. This will go.
 func (c *OpContext) Impl() Runtime {
-	return c.config.Runtime
-}
-
-// If IsTentative is set, evaluation of an arc should not finalize
-// to non-concrete values.
-func (c *OpContext) IsTentative() bool {
-	return c.tentative > 0
+	return c.Runtime
 }
 
 func (c *OpContext) Pos() token.Pos {
@@ -231,8 +217,8 @@ func (c *OpContext) Source() ast.Node {
 }
 
 // NewContext creates an operation context.
-func NewContext(r Runtime, u Unifier, v *Vertex) *OpContext {
-	return New(v, &Config{Runtime: r, Unifier: u})
+func NewContext(r Runtime, v *Vertex) *OpContext {
+	return New(v, &Config{Runtime: r})
 }
 
 func (c *OpContext) pos() token.Pos {
@@ -268,7 +254,7 @@ func (c *OpContext) relNode(upCount int32) *Vertex {
 	for ; upCount > 0; upCount-- {
 		e = e.Up
 	}
-	c.Unify(c, e.Vertex, Partial)
+	c.Unify(e.Vertex, Partial)
 	return e.Vertex
 }
 
@@ -352,19 +338,6 @@ func (c *OpContext) AddErrf(format string, args ...interface{}) *Bottom {
 	return c.AddErr(c.Newf(format, args...))
 }
 
-func (c *OpContext) validate(v Value) *Bottom {
-	switch x := v.(type) {
-	case *Bottom:
-		return x
-	case *Vertex:
-		v := c.Unifier.Evaluate(c, x)
-		if b, ok := v.(*Bottom); ok {
-			return b
-		}
-	}
-	return nil
-}
-
 type frame struct {
 	env *Environment
 	err *Bottom
@@ -413,7 +386,7 @@ func (c *OpContext) PopArc(saved *Vertex) {
 func (c *OpContext) Resolve(env *Environment, r Resolver) (*Vertex, *Bottom) {
 	s := c.PushState(env, r.Source())
 
-	arc := r.resolve(c)
+	arc := r.resolve(c, AllArcs)
 	// TODO: check for cycle errors?
 
 	err := c.PopState(s)
@@ -456,11 +429,7 @@ func (c *OpContext) Validate(check Validator, value Value) *Bottom {
 func (c *OpContext) Yield(env *Environment, y Yielder, f YieldFunc) *Bottom {
 	s := c.PushState(env, y.Source())
 
-	c.tentative++
-
 	y.yield(c, f)
-
-	c.tentative--
 
 	return c.PopState(s)
 
@@ -532,7 +501,7 @@ func (c *OpContext) getDefault(v Value) (result Value, ok bool) {
 func (c *OpContext) Evaluate(env *Environment, x Expr) (result Value, complete bool) {
 	s := c.PushState(env, x.Source())
 
-	val := c.eval(x)
+	val := c.evalState(x, Partial)
 
 	complete = true
 
@@ -558,6 +527,23 @@ func (c *OpContext) Evaluate(env *Environment, x Expr) (result Value, complete b
 	return val, true
 }
 
+func (c *OpContext) evaluateRec(env *Environment, x Expr, state VertexStatus) Value {
+	s := c.PushState(env, x.Source())
+
+	val := c.evalState(x, state)
+	if val == nil {
+		// Be defensive: this never happens, but just in case.
+		Assertf(false, "nil return value: unspecified error")
+		val = &Bottom{
+			Code: IncompleteError,
+			Err:  c.Newf("UNANTICIPATED ERROR"),
+		}
+	}
+	_ = c.PopState(s)
+
+	return val
+}
+
 // value evaluates expression v within the current environment. The result may
 // be nil if the result is incomplete. value leaves errors untouched to that
 // they can be collected by the caller.
@@ -566,11 +552,6 @@ func (c *OpContext) value(x Expr) (result Value) {
 
 	v, _ = c.getDefault(v)
 	v = Unwrap(v)
-	return v
-}
-
-func (c *OpContext) eval(x Expr) (result Value) {
-	v := c.evalState(x, Partial)
 	return v
 }
 
@@ -607,18 +588,91 @@ func (c *OpContext) evalState(v Expr, state VertexStatus) (result Value) {
 		return v
 
 	case Resolver:
-		arc := x.resolve(c)
+		arc := x.resolve(c, state)
 		if c.HasErr() {
 			return nil
 		}
-		if isIncomplete(arc) {
-			if arc != nil {
-				return arc.Value() // *Bottom
-			}
+		if arc == nil {
 			return nil
 		}
 
-		v := c.Unifier.Evaluate(c, arc)
+		v := c.evaluate(arc, state)
+		return v
+
+	default:
+		// This can only happen, really, if v == nil, which is not allowed.
+		panic(fmt.Sprintf("unexpected Expr type %T", v))
+	}
+}
+
+// unifyNode returns a possibly partially evaluated node value.
+//
+// TODO: maybe return *Vertex, *Bottom
+//
+func (c *OpContext) unifyNode(v Expr, state VertexStatus) (result Value) {
+	savedSrc := c.src
+	c.src = v.Source()
+	err := c.errs
+	c.errs = nil
+
+	defer func() {
+		c.errs = CombineErrors(c.src, c.errs, err)
+
+		if v, ok := result.(*Vertex); ok {
+			if b, _ := v.BaseValue.(*Bottom); b != nil {
+				switch b.Code {
+				case IncompleteError:
+				case CycleError:
+					if state == Partial {
+						break
+					}
+					fallthrough
+				default:
+					result = b
+				}
+			}
+		}
+
+		// TODO: remove this when we handle errors more principally.
+		if b, ok := result.(*Bottom); ok {
+			if c.src != nil &&
+				b.Code == CycleError &&
+				b.Err.Position() == token.NoPos &&
+				len(b.Err.InputPositions()) == 0 {
+				bb := *b
+				bb.Err = errors.Wrapf(b.Err, c.src.Pos(), "")
+				result = &bb
+			}
+			c.errs = CombineErrors(c.src, c.errs, result)
+		}
+		if c.errs != nil {
+			result = c.errs
+		}
+		c.src = savedSrc
+	}()
+
+	switch x := v.(type) {
+	case Value:
+		return x
+
+	case Evaluator:
+		v := x.evaluate(c)
+		return v
+
+	case Resolver:
+		v := x.resolve(c, state)
+		if c.HasErr() {
+			return nil
+		}
+		if v == nil {
+			return nil
+		}
+
+		if v.BaseValue == nil || v.BaseValue == cycle {
+			// Use node itself to allow for cycle detection.
+			c.Unify(v, AllArcs)
+		}
+
 		return v
 
 	default:
@@ -753,24 +807,33 @@ func pos(x Node) token.Pos {
 	return x.Source().Pos()
 }
 
-func (c *OpContext) node(orig Node, x Expr, scalar bool) *Vertex {
+func (c *OpContext) node(orig Node, x Expr, scalar bool, state VertexStatus) *Vertex {
 	// TODO: always get the vertex. This allows a whole bunch of trickery
 	// down the line.
-	v := c.evalState(x, EvaluatingArcs)
+	v := c.unifyNode(x, state)
 
 	v, ok := c.getDefault(v)
 	if !ok {
 		// Error already generated by getDefault.
 		return emptyNode
 	}
+
+	// The two if blocks below are rather subtle. If we have an error of
+	// the sentinel value cycle, we have earlier determined that the cycle is
+	// allowed and that it can be ignored here. Any other CycleError is an
+	// annotated cycle error that could be taken as is.
+	// TODO: do something simpler.
 	if scalar {
-		v = Unwrap(v)
+		if w := Unwrap(v); w != cycle {
+			v = w
+		}
 	}
 
 	node, ok := v.(*Vertex)
-	if ok {
+	if ok && node.BaseValue != cycle {
 		v = node.Value()
 	}
+
 	switch nv := v.(type) {
 	case nil:
 		switch orig.(type) {
@@ -1099,6 +1162,6 @@ func (c *OpContext) NewList(values ...Value) *Vertex {
 	for _, x := range values {
 		list.Elems = append(list.Elems, x)
 	}
-	c.Unify(c, v, Finalized)
+	c.Unify(v, Finalized)
 	return v
 }

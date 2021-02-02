@@ -29,6 +29,10 @@ func Default(v Value) Value {
 func (d *Disjunction) Default() Value {
 	switch d.NumDefaults {
 	case 0:
+		if d.HasDefaults {
+			// empty disjunction
+			return &Bottom{}
+		}
 		return d
 	case 1:
 		return d.Values[0]
@@ -54,11 +58,19 @@ func (v *Vertex) Default() *Vertex {
 
 		switch d.NumDefaults {
 		case 0:
+			if d.HasDefaults {
+				v = &Vertex{
+					Parent:    v.Parent,
+					status:    Finalized,
+					BaseValue: &Bottom{},
+				}
+			}
 			return v
 		case 1:
 			w = d.Values[0]
 		default:
 			x := *v
+			x.state = nil
 			x.BaseValue = &Disjunction{
 				Src:         d.Src,
 				Values:      d.Values[:d.NumDefaults],
@@ -81,6 +93,7 @@ func (v *Vertex) Default() *Vertex {
 
 		w := *v
 		w.BaseValue = &m
+		w.state = nil
 		return &w
 	}
 }

@@ -95,6 +95,11 @@ t11: {
     a: #A
 }
 
+cross: {
+    a: *"word" | string
+    a:  string | *"word"
+}
+
 
 d100: {
   // Should we allow a selector to imply a struct or list? Would be convenient.
@@ -103,6 +108,31 @@ d100: {
   j: i.bar
 }
 
+issue641: {
+    #A: {
+      type: "a"
+      x:    ""
+    }
+
+    #B: {
+      type: "b"
+      x:    string
+    }
+
+    #C: {
+      b: #A | #B
+    }
+
+    e: [string]: #C & {
+      b: #A | #B
+    }
+
+    e: foobar: #C & {
+      b: #B & {
+        x: "foobar"
+      }
+    }
+}
 -- out/eval --
 Errors:
 f: 2 errors in empty disjunction:
@@ -234,13 +264,43 @@ Result:
       }, (#struct){
       }) }
   }
+  cross: (struct){
+    a: (string){ |(*(string){ "word" }, (string){ string }) }
+  }
   d100: (struct){
     i: ((null|struct)){ |((null){ null }, (struct){
         bar: (int){ 2 }
       }) }
     j: (_|_){
       // [incomplete] d100.j: unresolved disjunction null | {bar:2} (type (null|struct)):
-      //     ./in.cue:102:6
+      //     ./in.cue:107:6
+    }
+  }
+  issue641: (struct){
+    #A: (#struct){
+      type: (string){ "a" }
+      x: (string){ "" }
+    }
+    #B: (#struct){
+      type: (string){ "b" }
+      x: (string){ string }
+    }
+    #C: (#struct){
+      b: (struct){ |((#struct){
+          type: (string){ "a" }
+          x: (string){ "" }
+        }, (#struct){
+          type: (string){ "b" }
+          x: (string){ string }
+        }) }
+    }
+    e: (struct){
+      foobar: (#struct){
+        b: (#struct){
+          type: (string){ "b" }
+          x: (string){ "foobar" }
+        }
+      }
     }
   }
 }
@@ -393,10 +453,39 @@ Result:
     a: 〈0;b〉
     a: 〈0;#A〉
   }
+  cross: {
+    a: (*"word"|string)
+    a: (string|*"word")
+  }
   d100: {
     i: (null|{
       bar: 2
     })
     j: 〈0;i〉.bar
+  }
+  issue641: {
+    #A: {
+      type: "a"
+      x: ""
+    }
+    #B: {
+      type: "b"
+      x: string
+    }
+    #C: {
+      b: (〈1;#A〉|〈1;#B〉)
+    }
+    e: {
+      [string]: (〈1;#C〉 & {
+        b: (〈2;#A〉|〈2;#B〉)
+      })
+    }
+    e: {
+      foobar: (〈1;#C〉 & {
+        b: (〈2;#B〉 & {
+          x: "foobar"
+        })
+      })
+    }
   }
 }
